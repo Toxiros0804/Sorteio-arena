@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sorteio Arena</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://ddragon.leagueoflegends.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&family=Barlow:wght@400;500;600;700&display=swap">
 <style>
 :root{
@@ -96,6 +97,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--gold-hi);outlin
   display:grid;place-items:center;padding:0 16px;overflow-y:auto}
 .lock[hidden]{display:none}
 .lock-card{background:var(--panel);border:1px solid var(--gold);max-width:720px;width:100%;margin:20px 0;padding:30px 24px 0;text-align:center;display:flex;flex-direction:column;gap:14px;align-items:center;border-radius:4px}
+.lock-foot[hidden],.mode[hidden],.intel[hidden]{display:none}
 .lock-foot{position:sticky;bottom:0;width:calc(100% + 48px);margin:0 -24px;padding:14px 24px 16px;background:var(--panel);border-top:1px solid var(--line);display:flex;flex-direction:column;gap:6px;align-items:center}
 
 .mode{display:flex;flex-direction:column;align-items:center;gap:4px;width:100%;padding:12px;border:1px solid var(--line);background:var(--panel2);border-radius:3px}
@@ -210,7 +212,14 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--gold-hi);outlin
     <h2 id="lockName">—</h2>
     <div class="mode" id="mode" aria-live="polite"><span>Estratégia sorteada</span><b id="modeName">—</b><small id="modeDesc"></small></div>
     <div class="intel" id="intel"></div>
-    <div class="lock-foot">
+    <div class="lock-foot" id="confirmFoot">
+      <p>Vai jogar com esse campeão? Ao confirmar, a estratégia é sorteada e a build e os aprimoramentos são carregados.</p>
+      <div class="lock-actions">
+        <button class="yes" id="playBtn" type="button">Vou jogar</button>
+      </div>
+      <button class="skipb" id="skipBtn2" type="button">Pular sem jogar (não tenho o campeão, indisponível…)</button>
+    </div>
+    <div class="lock-foot" id="playFoot">
       <p>Jogue a partida. Você ganhou com esse campeão?</p>
       <div class="lock-actions">
         <button class="yes" id="yesBtn" type="button">Sim, ganhei</button>
@@ -252,7 +261,7 @@ function initials(n){ return n.replace(/[^A-Za-zÀ-ÿ ]/g,"").split(" ").filter(
 function fillPortrait(el, name){
   el.textContent = "";
   const u = name && imgOf(name);
-  if(u){ const img = new Image(); img.alt = ""; img.src = u; img.onerror = () => { el.textContent = initials(name); }; el.appendChild(img); }
+  if(u){ const img = new Image(); img.alt = ""; img.loading = "lazy"; img.decoding = "async"; img.src = u; img.onerror = () => { el.textContent = initials(name); }; el.appendChild(img); }
   else el.textContent = name ? initials(name) : "?";
 }
 function portrait(name){ const d = document.createElement("span"); d.className = "portrait"; fillPortrait(d, name); return d; }
@@ -312,14 +321,21 @@ function render(){
   showLock();
 }
 
+// Duas etapas: confirmar que vai jogar (pendingMode vazio) e depois registrar o resultado.
+// Os dados só são buscados depois da confirmação.
 function showLock(){
   const lk = $("lock");
   if(state.pending && !spinning){
+    const ok = !!state.pendingMode;
     $("lockName").textContent = state.pending; fillPortrait($("lockPic"), state.pending);
-    if(!state.pendingMode){ state.pendingMode = rollMode(); save(); rollModeAnim(); }
-    else if(intelFor !== state.pending + "|" + state.pendingMode) showMode();
-    if(lk.hidden){ lk.hidden = false; $("yesBtn").focus(); }
+    $("confirmFoot").hidden = ok; $("playFoot").hidden = !ok; $("mode").hidden = !ok; $("intel").hidden = !ok;
+    if(ok && intelFor !== state.pending + "|" + state.pendingMode) showMode();
+    if(lk.hidden){ lk.hidden = false; $(ok ? "yesBtn" : "playBtn").focus(); }
   } else { lk.hidden = true; intelFor = null; }
+}
+function confirmPlay(){
+  if(!state.pending || state.pendingMode) return;
+  state.pendingMode = rollMode(); save(); rollModeAnim(); render(); $("yesBtn").focus();
 }
 
 // ---- Sorteio da estratégia ----
@@ -346,23 +362,42 @@ function showMode(){
 }
 
 // ---- Build e aprimoramentos (op.gg) ----
+// Os nomes de itens e aprimoramentos (~1,2 MB para baixar) ficam guardados até o próximo patch;
+// as estatísticas do op.gg de cada campeão ficam guardadas por 6 horas.
+const LSN = "arena-nomes-v1", LSS = "arena-opgg-v1", STATS_TTL = 6 * 3600e3, STATS_MAX = 25;
+function lsGet(k){ try{ return JSON.parse(localStorage.getItem(k) || "null"); }catch(e){ return null; } }
+function lsSet(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
 let metaP = null;
 function loadMeta(){
   if(!metaP) metaP = (async () => {
     const v = ver || (await (await fetch(`${DD}/api/versions.json`)).json())[0];
+    const cached = lsGet(LSN);
+    if(cached && cached.v === v) return cached;
     const [items, arena] = await Promise.all([
       fetch(`${DD}/cdn/${v}/data/pt_BR/item.json`).then(r => r.json()),
       fetch(`${CDRAGON}/cdragon/arena/pt_br.json`).then(r => r.json())
     ]);
     const augs = {}; for(const a of arena.augments) augs[a.id] = { name: a.name, icon: a.iconSmall ? `${CDRAGON}/game/${a.iconSmall.toLowerCase()}` : null };
     const it = {}; for(const [id, x] of Object.entries(items.data)) it[id] = x.name;
-    return { v, items: it, augs };
+    const meta = { v, items: it, augs }; lsSet(LSN, meta);
+    return meta;
   })().catch(e => { metaP = null; throw e; });
   return metaP;
 }
 const statsCache = {};
 function loadStats(key){
-  if(!statsCache[key]) statsCache[key] = fetch(OPGG + key).then(r => { if(!r.ok) throw 0; return r.json(); }).catch(e => { delete statsCache[key]; throw e; });
+  if(!statsCache[key]) statsCache[key] = (async () => {
+    const all = lsGet(LSS) || {}, hit = all[key];
+    if(hit && Date.now() - hit.t < STATS_TTL) return hit.s;
+    const r = await fetch(OPGG + key); if(!r.ok) throw 0;
+    const j = await r.json(), d = j.data;
+    // Guarda só o que a página usa
+    const s = { meta: j.meta, data: { summary: d.summary, core_items: d.core_items, boots: d.boots, last_items: d.last_items, prism_items: d.prism_items, augment_group: d.augment_group } };
+    all[key] = { t: Date.now(), s };
+    const keep = Object.entries(all).sort((a, b) => b[1].t - a[1].t).slice(0, STATS_MAX);
+    lsSet(LSS, Object.fromEntries(keep));
+    return s;
+  })().catch(e => { delete statsCache[key]; throw e; });
   return statsCache[key];
 }
 const wr = e => e.play ? e.win / e.play : 0;
@@ -529,7 +564,8 @@ $("resetBtn").onclick = () => {
 $("drawBtn").onclick = draw;
 $("yesBtn").onclick = () => answer("win");
 $("noBtn").onclick = () => answer("loss");
-$("skipBtn").onclick = () => answer("skip");
+$("skipBtn").onclick = $("skipBtn2").onclick = () => answer("skip");
+$("playBtn").onclick = confirmPlay;
 $("undoBtn").onclick = undo;
 $("search").oninput = render;
 document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
@@ -546,6 +582,8 @@ try{ const c = JSON.parse(localStorage.getItem(LSC) || "null"); if(c && c.list){
   try{
     const versions = await (await fetch(`${DD}/api/versions.json`)).json();
     const v = versions[0];
+    // Mesmo patch da lista salva: não precisa baixar a lista de campeões de novo
+    if(v === ver && champs.length && champs[0].key){ $("sync").textContent = `Patch ${v} · ${champs.length} campeões`; return; }
     const data = (await (await fetch(`${DD}/cdn/${v}/data/pt_BR/champion.json`)).json()).data;
     const list = Object.values(data).map(c => ({ name: c.name, img: `${DD}/cdn/${v}/img/champion/${c.image.full}`, key: c.key, id: c.id }));
     ver = v;
